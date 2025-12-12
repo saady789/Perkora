@@ -1,4 +1,4 @@
-globalThis.__RAINDROP_GIT_COMMIT_SHA = "unknown"; 
+globalThis.__RAINDROP_GIT_COMMIT_SHA = "aa814552ea1f4d62536618e7355ca6c823e5eaec"; 
 
 // node_modules/@liquidmetal-ai/raindrop-framework/dist/core/cors.js
 var matchOrigin = (request, env, config) => {
@@ -90,6 +90,212 @@ var cors = corsAllowAll;
 
 // src/hello-service/index.ts
 import { Service } from "./runtime.js";
+
+// src/agent.ts
+var SYSTEM_PROMPT = `
+You are a startup perks assistant.
+
+Rules you MUST follow:
+- You do NOT invent perks.
+- You ONLY reason about information given by the user or provided to you.
+- If required information is missing, you ask ONE clear follow-up question.
+- Do NOT ask multiple questions at once.
+- Do NOT recommend perks unless explicitly told that perk data is available.
+
+Your goal is to:
+1. Understand the user's startup.
+2. Collect missing required information.
+3. When enough information exists, indicate readiness to query perks.
+
+Required information checklist:
+- startup_stage
+- cloud_or_stack
+- primary_goal (credits or discounts)
+- startup_type_or_industry
+
+When responding, always output JSON ONLY in this format:
+
+{
+  "action": "ask_question" | "ready",
+  "question": string | null,
+  "extracted": {
+    "startup_stage": string | null,
+    "cloud_or_stack": string | null,
+    "primary_goal": string | null,
+    "startup_type_or_industry": string | null
+  },
+  "reply": string
+}
+
+Never hallucinate. Never assume. Ask if unsure.
+`;
+async function runAgent(input, ai) {
+  const res = await ai.run("llama-3.3-70b", {
+    model: "llama-3.3-70b",
+    messages: [{ role: "system", content: SYSTEM_PROMPT }, ...input.messages],
+    max_tokens: 400,
+    temperature: 0.2
+  });
+  const raw = res?.choices?.[0]?.message?.content;
+  if (!raw) {
+    return {
+      reply: "I could not understand your request.",
+      action: "ask_question",
+      extracted: {
+        startup_stage: null,
+        cloud_or_stack: null,
+        primary_goal: null,
+        startup_type_or_industry: null
+      }
+    };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {
+      reply: "Let me clarify a bit more about your startup.",
+      action: "ask_question",
+      extracted: {
+        startup_stage: null,
+        cloud_or_stack: null,
+        primary_goal: null,
+        startup_type_or_industry: null
+      }
+    };
+  }
+  return {
+    reply: parsed.reply ?? "Let me ask you one more thing.",
+    action: parsed.action === "ready" ? "ready" : "ask_question",
+    extracted: {
+      startup_stage: parsed.extracted?.startup_stage ?? null,
+      cloud_or_stack: parsed.extracted?.cloud_or_stack ?? null,
+      primary_goal: parsed.extracted?.primary_goal ?? null,
+      startup_type_or_industry: parsed.extracted?.startup_type_or_industry ?? null
+    }
+  };
+}
+var PERK_ANALYSIS_PROMPT = `
+You are a startup perks analyst.
+
+Rules:
+- You ONLY analyze perks provided to you.
+- You do NOT invent perks.
+- You MAY use conservative default assumptions when dollar values are missing.
+- You MUST clearly state all assumptions in notes.
+- If a perk gives a percentage but no baseline, assume a SMALL startup baseline.
+- If AWS credits are mentioned, assume $1,000 unless otherwise stated.
+- If a discount percentage is given, assume a $100 to $300 monthly tool spend.
+- Always return numeric estimates when perks exist.
+- Always include the original perk link exactly as provided.
+- Never modify, shorten, or invent links.
+
+Assumption defaults (use unless startup data says otherwise):
+- Monthly cloud spend: $300
+- Monthly tools spend: $200
+- Runway burn: $3,000 per month
+
+You will receive:
+1. Startup info
+2. A list of perks (JSON)
+
+You must output JSON ONLY in this format:
+
+{
+  "summary": {
+    "total_estimated_savings_usd": number,
+    "estimated_runway_extension_months": number,
+    "notes": string
+  },
+  "perks": [
+    {
+      "name": string,
+      "company": string,
+      "benefit": string,
+      "estimated_value_usd": number,
+      "why_it_matters": string,
+      "link": string
+    }
+  ]
+}
+
+Never hallucinate perk names. Never omit numbers when perks exist.
+`;
+async function analyzePerksWithAI(ai, startupInfo, perks) {
+  const res = await ai.run("llama-3.3-70b", {
+    model: "llama-3.3-70b",
+    messages: [
+      { role: "system", content: PERK_ANALYSIS_PROMPT },
+      {
+        role: "user",
+        content: JSON.stringify({
+          startup: startupInfo,
+          perks
+        })
+      }
+    ],
+    temperature: 0.1,
+    max_tokens: 600
+  });
+  const raw = res?.choices?.[0]?.message?.content;
+  console.log("perks are ", perks);
+  if (!raw) return null;
+  try {
+    const cleaned = raw.trim();
+    const jsonStart = cleaned.indexOf("{");
+    const jsonEnd = cleaned.lastIndexOf("}");
+    if (jsonStart === -1 || jsonEnd === -1) {
+      console.log("INVALID ANALYSIS OUTPUT:", raw);
+      return null;
+    }
+    return JSON.parse(cleaned.slice(jsonStart, jsonEnd + 1));
+  } catch (err) {
+    console.log("ANALYSIS PARSE ERROR:", err);
+    console.log("RAW OUTPUT:", raw);
+    return null;
+  }
+}
+async function buildSmartQuery(extracted, ai) {
+  const PROMPT = `
+You extract up to 3 technology or platform names.
+
+Rules:
+- Output ONLY a JSON array of strings
+- Max 3 items
+- Lowercase
+- No sentences
+- No stages, no industries, no goals
+- Examples of valid outputs:
+  ["aws"]
+  ["aws", "github"]
+  ["stripe", "vercel"]
+- If unsure, output an empty array []
+
+Input will be structured startup data.
+`;
+  try {
+    const res = await ai.run("llama-3.3-70b", {
+      model: "llama-3.3-70b",
+      messages: [
+        { role: "system", content: PROMPT },
+        { role: "user", content: JSON.stringify(extracted) }
+      ],
+      temperature: 0,
+      max_tokens: 80
+    });
+    const raw = res?.choices?.[0]?.message?.content;
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.filter((v) => typeof v === "string").slice(0, 3).map((v) => v.toLowerCase().trim());
+    }
+  } catch (e) {
+    console.log("buildSmartQuery failed", e);
+  }
+  return [];
+}
+
+// src/hello-service/index.ts
 var hello_service_default = class extends Service {
   async fetch(request) {
     const url = new URL(request.url);
@@ -105,6 +311,9 @@ var hello_service_default = class extends Service {
     }
     if (url.pathname === "/api/perks/query" && request.method === "POST") {
       return this.queryPerks(request);
+    }
+    if (url.pathname === "/api/agent" && request.method === "POST") {
+      return this.handleAgent(request);
     }
     if (url.pathname === "/api/debug-schema") {
       const result = await this.env.PERKS_DB.executeQuery({
@@ -194,6 +403,88 @@ var hello_service_default = class extends Service {
       );
     }
   }
+  async handleAgent(request) {
+    try {
+      const body = await request.json();
+      if (!body || !Array.isArray(body.messages)) {
+        return Response.json(
+          { success: false, error: "messages array required" },
+          { status: 400 }
+        );
+      }
+      const result = await runAgent({ messages: body.messages }, this.env.AI);
+      if (result.action === "ask_question") {
+        return Response.json({
+          success: true,
+          action: "ask_question",
+          reply: result.reply
+        });
+      }
+      const tokens = await buildSmartQuery(result.extracted, this.env.AI);
+      console.log("TOKENS:", tokens);
+      let perks = [];
+      if (tokens.length > 0) {
+        const likeClauses = tokens.map(
+          (t) => `
+            name LIKE '%${t}%' OR
+            company LIKE '%${t}%' OR
+            description LIKE '%${t}%' OR
+            benefit_type LIKE '%${t}%' OR
+            category LIKE '%${t}%'
+          `
+        ).join(" OR ");
+        const sql = `
+        SELECT *
+        FROM perks
+        WHERE ${likeClauses}
+        ORDER BY created_at DESC;
+      `;
+        const res = await this.env.PERKS_DB.executeQuery({
+          sqlQuery: sql,
+          format: "json"
+        });
+        perks = res.results ? JSON.parse(res.results) : [];
+      }
+      let analysis = null;
+      if (perks.length > 0) {
+        analysis = await analyzePerksWithAI(
+          this.env.AI,
+          result.extracted,
+          perks
+        );
+      }
+      return Response.json({
+        success: true,
+        action: "ready",
+        reply: perks.length > 0 ? "Here are relevant perks for your startup." : "No matching perks found yet.",
+        perks,
+        analysis
+      });
+    } catch (err) {
+      return Response.json(
+        { success: false, error: err.message },
+        { status: 500 }
+      );
+    }
+  }
+  // private buildSmartQuery(extracted: {
+  //   startup_stage: string | null;
+  //   cloud_or_stack: string | null;
+  //   primary_goal: string | null;
+  //   startup_type_or_industry: string | null;
+  // }) {
+  //   const tokens: string[] = [];
+  //   if (extracted.startup_type_or_industry)
+  //     tokens.push(extracted.startup_type_or_industry);
+  //   if (extracted.cloud_or_stack) tokens.push(extracted.cloud_or_stack);
+  //   if (extracted.primary_goal) tokens.push(extracted.primary_goal);
+  //   if (extracted.startup_stage) tokens.push(extracted.startup_stage);
+  //   return tokens
+  //     .join(" ")
+  //     .replace(/[^a-zA-Z0-9\s]/g, "")
+  //     .toLowerCase()
+  //     .trim();
+  // }
   async queryPerks(request) {
     try {
       const body = await request.json();

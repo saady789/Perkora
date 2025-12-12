@@ -1,6 +1,7 @@
 import { Service } from "@liquidmetal-ai/raindrop-framework";
 import { Env } from "./raindrop.gen";
-
+import { runAgent, analyzePerksWithAI, buildSmartQuery } from "../agent";
+import { Ai } from "@liquidmetal-ai/raindrop-framework";
 export default class extends Service<Env> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -19,6 +20,10 @@ export default class extends Service<Env> {
 
     if (url.pathname === "/api/perks/query" && request.method === "POST") {
       return this.queryPerks(request);
+    }
+
+    if (url.pathname === "/api/agent" && request.method === "POST") {
+      return this.handleAgent(request);
     }
 
     if (url.pathname === "/api/debug-schema") {
@@ -132,6 +137,116 @@ export default class extends Service<Env> {
       );
     }
   }
+
+  private async handleAgent(request: Request): Promise<Response> {
+    try {
+      const body: any = await request.json();
+
+      if (!body || !Array.isArray(body.messages)) {
+        return Response.json(
+          { success: false, error: "messages array required" },
+          { status: 400 }
+        );
+      }
+
+      const result = await runAgent({ messages: body.messages }, this.env.AI);
+
+      // Still collecting info
+      if (result.action === "ask_question") {
+        return Response.json({
+          success: true,
+          action: "ask_question",
+          reply: result.reply,
+        });
+      }
+
+      // ===== READY STATE =====
+
+      // buildSmartQuery now returns tokens
+      const tokens = await buildSmartQuery(result.extracted, this.env.AI);
+      console.log("TOKENS:", tokens);
+
+      let perks: any[] = [];
+
+      if (tokens.length > 0) {
+        const likeClauses = tokens
+          .map(
+            (t) => `
+            name LIKE '%${t}%' OR
+            company LIKE '%${t}%' OR
+            description LIKE '%${t}%' OR
+            benefit_type LIKE '%${t}%' OR
+            category LIKE '%${t}%'
+          `
+          )
+          .join(" OR ");
+
+        const sql = `
+        SELECT *
+        FROM perks
+        WHERE ${likeClauses}
+        ORDER BY created_at DESC;
+      `;
+
+        const res = await this.env.PERKS_DB.executeQuery({
+          sqlQuery: sql,
+          format: "json",
+        });
+
+        perks = res.results ? JSON.parse(res.results) : [];
+      }
+
+      let analysis = null;
+
+      if (perks.length > 0) {
+        analysis = await analyzePerksWithAI(
+          this.env.AI,
+          result.extracted,
+          perks
+        );
+      }
+
+      return Response.json({
+        success: true,
+        action: "ready",
+        reply:
+          perks.length > 0
+            ? "Here are relevant perks for your startup."
+            : "No matching perks found yet.",
+        perks,
+        analysis,
+      });
+    } catch (err: any) {
+      return Response.json(
+        { success: false, error: err.message },
+        { status: 500 }
+      );
+    }
+  }
+
+  // private buildSmartQuery(extracted: {
+  //   startup_stage: string | null;
+  //   cloud_or_stack: string | null;
+  //   primary_goal: string | null;
+  //   startup_type_or_industry: string | null;
+  // }) {
+  //   const tokens: string[] = [];
+
+  //   if (extracted.startup_type_or_industry)
+  //     tokens.push(extracted.startup_type_or_industry);
+
+  //   if (extracted.cloud_or_stack) tokens.push(extracted.cloud_or_stack);
+
+  //   if (extracted.primary_goal) tokens.push(extracted.primary_goal);
+
+  //   if (extracted.startup_stage) tokens.push(extracted.startup_stage);
+
+  //   return tokens
+  //     .join(" ")
+  //     .replace(/[^a-zA-Z0-9\s]/g, "")
+  //     .toLowerCase()
+  //     .trim();
+  // }
 
   private async queryPerks(request: Request): Promise<Response> {
     try {

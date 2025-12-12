@@ -7,4 +7,5 @@ application "hello-world" {
 
   smartsql "perks-db" {}
 
+  
 }
