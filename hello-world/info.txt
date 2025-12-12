@@ -1,0 +1,26 @@
+User
+  →
+Frontend
+  →
+LangGraph Agent (on Vultr)
+  →
+Raindrop MCP Tools
+  →
+SmartSQL / SmartMemory / SmartInference
+
+
+raindrop build deploy --start
+
+
+application "hello-world" {
+  service "hello-service" {
+    domain {
+      cname = "hello-service"
+    }
+  }
+
+  application "perkora" {
+  smartsql "perks" {}
+}
+
+}

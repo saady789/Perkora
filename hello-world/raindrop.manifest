@@ -1,0 +1,10 @@
+application "hello-world" {
+  service "hello-service" {
+    domain {
+      cname = "hello-service"
+    }
+  }
+
+  smartsql "perks-db" {}
+
+}
