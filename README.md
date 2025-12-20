@@ -99,7 +99,7 @@ Receive a curated list of perks tailored to your startup with:
 
 ### Step 1: Sign Up
 
-Visit [perkora.app](https://perkora.app) and create your account using:
+Visit [perkora](https://perkora.vercel.app/) and create your account using:
 - Email and password
 - Google Sign-In
 - GitHub Sign-In
